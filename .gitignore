@@ -27,3 +27,5 @@ demo-ui-config.js
 **/.DS_Store
 **/.vscode
 **/.idea
+
+source/constructs/cdk.json

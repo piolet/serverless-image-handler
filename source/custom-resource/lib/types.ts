@@ -5,22 +5,26 @@ import {
   CheckFallbackImageRequestProperties,
   CheckSecretManagerRequestProperties,
   CheckSourceBucketsRequestProperties,
-  CopyS3AssetsRequestProperties,
   CreateLoggingBucketRequestProperties,
   CustomResourceRequestPropertiesBase,
   PutConfigRequestProperties,
   SendMetricsRequestProperties,
+  CheckFirstBucketRegionRequestProperties,
+  GetAppRegApplicationNameRequestProperties,
+  ValidateExistingDistributionRequestProperties,
 } from "./interfaces";
 
 export type ResourcePropertyTypes =
   | CustomResourceRequestPropertiesBase
   | SendMetricsRequestProperties
   | PutConfigRequestProperties
-  | CopyS3AssetsRequestProperties
   | CheckSourceBucketsRequestProperties
   | CheckSecretManagerRequestProperties
   | CheckFallbackImageRequestProperties
-  | CreateLoggingBucketRequestProperties;
+  | CreateLoggingBucketRequestProperties
+  | CheckFirstBucketRegionRequestProperties
+  | GetAppRegApplicationNameRequestProperties
+  | ValidateExistingDistributionRequestProperties;
 
 export class CustomResourceError extends Error {
   constructor(public readonly code: string, public readonly message: string) {

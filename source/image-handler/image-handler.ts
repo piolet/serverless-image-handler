@@ -9,6 +9,7 @@ import {
   BoundingBox,
   BoxSize,
   ContentTypes,
+  ErrorMapping,
   ImageEdits,
   ImageFitTypes,
   ImageFormatTypes,
@@ -17,11 +18,11 @@ import {
   RekognitionCompatibleImage,
   StatusCodes,
 } from "./lib";
+import { getAllowedSourceBuckets } from "./image-request";
+import { SHARP_EDIT_ALLOWLIST_ARRAY } from "./lib/constants";
 
 export class ImageHandler {
-  private readonly LAMBDA_PAYLOAD_LIMIT = 6 * 1024 * 1024;
-
-  constructor(private readonly s3Client: S3, private readonly rekognitionClient: Rekognition) { }
+  constructor(private readonly s3Client: S3, private readonly rekognitionClient: Rekognition) {}
 
   /**
    * Creates a Sharp object from Buffer
@@ -33,17 +34,30 @@ export class ImageHandler {
   // eslint-disable-next-line @typescript-eslint/ban-types
   private async instantiateSharpImage(originalImage: Buffer, edits: ImageEdits, options: Object): Promise<sharp.Sharp> {
     let image: sharp.Sharp = null;
+    try {
+      if (!edits || !Object.keys(edits).length) {
+        return sharp(originalImage, options);
+      }
+      if (edits.rotate !== undefined && edits.rotate === null) {
+        image = sharp(originalImage, options);
+      } else {
+        const metadata = await sharp(originalImage, options).metadata();
+        image = metadata.orientation
+          ? sharp(originalImage, options).withMetadata({ orientation: metadata.orientation })
+          : sharp(originalImage, options).withMetadata();
+      }
 
-    if (edits.rotate !== undefined && edits.rotate === null) {
-      image = sharp(originalImage, options);
-    } else {
-      const metadata = await sharp(originalImage, options).metadata();
-      image = metadata.orientation
-        ? sharp(originalImage, options).withMetadata({ orientation: metadata.orientation })
-        : sharp(originalImage, options).withMetadata();
+      return image;
+    } catch (error) {
+      this.handleError(
+        error,
+        new ImageHandlerError(
+          StatusCodes.BAD_REQUEST,
+          "InstantiationError",
+          "Input image could not be instantiated. Please choose a valid image."
+        )
+      );
     }
-
-    return image;
   }
 
   /**
@@ -73,17 +87,37 @@ export class ImageHandler {
    * @param imageRequestInfo An image request.
    * @returns Processed and modified image encoded as base64 string.
    */
-  async process(imageRequestInfo: ImageRequestInfo): Promise<string> {
+  async process(imageRequestInfo: ImageRequestInfo): Promise<Buffer> {
     const { originalImage, edits } = imageRequestInfo;
-    const options = { failOnError: false, animated: imageRequestInfo.contentType === ContentTypes.GIF };
-    let base64EncodedImage = "";
+    const { SHARP_SIZE_LIMIT } = process.env;
+    const limitInputPixels: number | boolean =
+      SHARP_SIZE_LIMIT === "" || isNaN(Number(SHARP_SIZE_LIMIT)) || Number(SHARP_SIZE_LIMIT);
+    const options = {
+      failOnError: false,
+      animated: imageRequestInfo.contentType === ContentTypes.GIF,
+      limitInputPixels,
+    };
+    try {
+      // Return early if no edits are required
+      if (!edits || !Object.keys(edits).length) {
+        if (imageRequestInfo.outputFormat !== undefined) {
+          // convert image to Sharp and change output format if specified
+          const modifiedImage = this.modifyImageOutput(
+            await this.instantiateSharpImage(originalImage, edits, options),
+            imageRequestInfo
+          );
+          return await modifiedImage.toBuffer();
+        }
+        // no edits or output format changes, convert to base64 encoded image
+        return originalImage;
+      }
 
-    // Apply edits if specified
-    if (edits && Object.keys(edits).length) {
-      // convert image to Sharp object
+      // Apply edits if specified
+      options.animated =
+        typeof edits.animated !== "undefined" ? edits.animated : imageRequestInfo.contentType === ContentTypes.GIF;
       let image = await this.instantiateSharpImage(originalImage, edits, options);
 
-      // default to non animated if image is a GIF without multiple pages
+      // default to non animated if image does not have multiple pages
       if (options.animated) {
         const metadata = await image.metadata();
         if (!metadata.pages || metadata.pages <= 1) {
@@ -91,45 +125,39 @@ export class ImageHandler {
           image = await this.instantiateSharpImage(originalImage, edits, options);
         }
       }
-
       // apply image edits
       let modifiedImage = await this.applyEdits(image, edits, options.animated);
       // modify image output if requested
       modifiedImage = this.modifyImageOutput(modifiedImage, imageRequestInfo);
-      // convert to base64 encoded string
-      const imageBuffer = await modifiedImage.toBuffer();
-      base64EncodedImage = imageBuffer.toString("base64");
-    } else {
-      if (imageRequestInfo.outputFormat !== undefined) {
-        // convert image to Sharp and change output format if specified
-        const modifiedImage = this.modifyImageOutput(sharp(originalImage, options), imageRequestInfo);
-        // convert to base64 encoded string
-        const imageBuffer = await modifiedImage.toBuffer();
-        base64EncodedImage = imageBuffer.toString("base64");
-      } else {
-        // no edits or output format changes, convert to base64 encoded image
-        base64EncodedImage = originalImage.toString("base64");
-      }
-    }
-
-    // binary data need to be base64 encoded to pass to the API Gateway proxy https://docs.aws.amazon.com/apigateway/latest/developerguide/lambda-proxy-binary-media.html.
-    // checks whether base64 encoded image fits in 6M limit, see https://docs.aws.amazon.com/lambda/latest/dg/gettingstarted-limits.html.
-    if (base64EncodedImage.length > this.LAMBDA_PAYLOAD_LIMIT) {
-      throw new ImageHandlerError(
-        StatusCodes.REQUEST_TOO_LONG,
-        "TooLargeImageException",
-        "The converted image is too large to return."
+      return await modifiedImage.toBuffer();
+    } catch (error) {
+      const errorMapping: ErrorMapping[] = [
+        {
+          pattern: "Image to composite must have same dimensions or smaller",
+          statusCode: StatusCodes.BAD_REQUEST,
+          errorType: "BadRequest",
+          message: (err: Error) => err.message.replace("composite", "overlay"),
+        },
+        {
+          pattern: "Bitstream not supported by this decoder",
+          statusCode: StatusCodes.BAD_REQUEST,
+          errorType: "BadRequest",
+          message: "Invalid base image. AVIF images with a bit-depth other than 8 are not supported for image edits.",
+        },
+      ];
+      this.handleError(
+        error,
+        new ImageHandlerError(StatusCodes.INTERNAL_SERVER_ERROR, "ProcessingFailure", "Image processing failed."),
+        errorMapping
       );
     }
-
-    return base64EncodedImage;
   }
 
   /**
    * Applies image modifications to the original image based on edits.
    * @param originalImage The original sharp image.
    * @param edits The edits to be made to the original image.
-   * @param isAnimation a flag whether the edit applies to `gif` file or not.
+   * @param isAnimation a flag whether the edit applies to animated files or not.
    * @returns A modifications to the original image.
    */
   public async applyEdits(originalImage: sharp.Sharp, edits: ImageEdits, isAnimation: boolean): Promise<sharp.Sharp> {
@@ -160,8 +188,11 @@ export class ImageHandler {
           this.applyCrop(originalImage, edits);
           break;
         }
+        case "animated": {
+          break;
+        }
         default: {
-          if (edit in originalImage) {
+          if (SHARP_EDIT_ALLOWLIST_ARRAY.includes(edit as any)) {
             originalImage[edit](edits[edit]);
           }
         }
@@ -180,24 +211,37 @@ export class ImageHandler {
     if (edits.resize === undefined) {
       edits.resize = {};
       edits.resize.fit = ImageFitTypes.INSIDE;
-    } else {
-      if (edits.resize.width) edits.resize.width = Math.round(Number(edits.resize.width));
-      if (edits.resize.height) edits.resize.height = Math.round(Number(edits.resize.height));
-
-      if (edits.resize.ratio) {
-        const ratio = edits.resize.ratio;
-
-        const { width, height } =
-          edits.resize.width && edits.resize.height ? edits.resize : await originalImage.metadata();
-
-        edits.resize.width = Math.round(width * ratio);
-        edits.resize.height = Math.round(height * ratio);
-        // Sharp doesn't have such parameter for resize(), we got it from Thumbor mapper.  We don't need to keep this field in the `resize` object
-        delete edits.resize.ratio;
-
-        if (!edits.resize.fit) edits.resize.fit = ImageFitTypes.INSIDE;
-      }
+      return;
     }
+    const resize = this.validateResizeInputs(edits.resize);
+
+    if (resize.ratio) {
+      const ratio = resize.ratio;
+
+      const { width, height } = resize.width && resize.height ? resize : await originalImage.metadata();
+
+      resize.width = Math.round(width * ratio);
+      resize.height = Math.round(height * ratio);
+      // Sharp doesn't have such parameter for resize(), we got it from Thumbor mapper.  We don't need to keep this field in the `resize` object
+      delete resize.ratio;
+
+      if (!resize.fit) resize.fit = ImageFitTypes.INSIDE;
+    }
+  }
+
+  /**
+   * Validates resize edit parameters.
+   * @param resize The resize parameters.
+   * @returns Validated resize inputs
+   */
+  private validateResizeInputs(resize) {
+    if (resize.width) resize.width = Math.round(Number(resize.width));
+    if (resize.height) resize.height = Math.round(Number(resize.height));
+
+    if ((resize.width != null && resize.width <= 0) || (resize.height != null && resize.height <= 0)) {
+      throw new ImageHandlerError(StatusCodes.BAD_REQUEST, "InvalidResizeException", "The image size is invalid.");
+    }
+    return resize;
   }
 
   /**
@@ -207,10 +251,15 @@ export class ImageHandler {
    * @param overlaySize the size of the overlay
    * @returns the calculated size
    */
-  private calcOverlaySizeOption = (editSize: string | undefined, imageSize: number, overlaySize: number): number => {
+  private calcOverlaySizeOption = (
+    editSize: string | number | undefined,
+    imageSize: number,
+    overlaySize: number
+  ): number => {
     let resultSize = NaN;
 
     if (editSize !== undefined) {
+      editSize = `${editSize}`;
       // if ends with p, it is a percentage
       if (editSize.endsWith("p")) {
         resultSize = parseInt(editSize.replace("p", ""));
@@ -273,9 +322,9 @@ export class ImageHandler {
         typeof edits.smartCrop === "object"
           ? edits.smartCrop
           : {
-            faceIndex: undefined,
-            padding: undefined,
-          };
+              faceIndex: undefined,
+              padding: undefined,
+            };
       const { imageBuffer, format } = await this.getRekognitionCompatibleImage(originalImage);
       const boundingBox = await this.getBoundingBox(imageBuffer.data, faceIndex ?? 0);
       const cropArea = this.getCropArea(boundingBox, padding ?? 0, imageBuffer.info);
@@ -286,10 +335,13 @@ export class ImageHandler {
           originalImage.toFormat(format);
         }
       } catch (error) {
-        throw new ImageHandlerError(
-          StatusCodes.BAD_REQUEST,
-          "SmartCrop::PaddingOutOfBounds",
-          "The padding value you provided exceeds the boundaries of the original image. Please try choosing a smaller value or applying padding via Sharp for greater specificity."
+        this.handleError(
+          error,
+          new ImageHandlerError(
+            StatusCodes.BAD_REQUEST,
+            "SmartCrop::PaddingOutOfBounds",
+            "The padding value you provided exceeds the boundaries of the original image. Please try choosing a smaller value or applying padding via Sharp for greater specificity."
+          )
         );
       }
     }
@@ -316,6 +368,7 @@ export class ImageHandler {
    * Applies round crop edit.
    * @param originalImage The original sharp image.
    * @param edits The edits to be made to the original image.
+   * @returns Sharp object with round crop performed
    */
   private async applyRoundCrop(originalImage: sharp.Sharp, edits: ImageEdits): Promise<sharp.Sharp> {
     // round crop can be boolean or object
@@ -324,11 +377,11 @@ export class ImageHandler {
         typeof edits.roundCrop === "object"
           ? edits.roundCrop
           : {
-            top: undefined,
-            left: undefined,
-            rx: undefined,
-            ry: undefined,
-          };
+              top: undefined,
+              left: undefined,
+              rx: undefined,
+              ry: undefined,
+            };
       const imageBuffer = await originalImage.toBuffer({ resolveWithObject: true });
       const width = imageBuffer.info.width;
       const height = imageBuffer.info.height;
@@ -393,10 +446,10 @@ export class ImageHandler {
         typeof edits.contentModeration === "object"
           ? edits.contentModeration
           : {
-            minConfidence: undefined,
-            blur: undefined,
-            moderationLabels: undefined,
-          };
+              minConfidence: undefined,
+              blur: undefined,
+              moderationLabels: undefined,
+            };
       const { imageBuffer, format } = await this.getRekognitionCompatibleImage(originalImage);
       const inappropriateContent = await this.detectInappropriateContent(imageBuffer.data, minConfidence);
 
@@ -453,6 +506,13 @@ export class ImageHandler {
     alpha: string,
     sourceImageMetadata: sharp.Metadata
   ): Promise<Buffer> {
+    if (!getAllowedSourceBuckets().includes(bucket)) {
+      throw new ImageHandlerError(
+        StatusCodes.FORBIDDEN,
+        "ImageBucket::CannotAccessBucket",
+        "The overlay image bucket you specified could not be accessed. Please check that the bucket is specified in your SOURCE_BUCKETS."
+      );
+    }
     const params = { Bucket: bucket, Key: key };
     try {
       const { width, height } = sourceImageMetadata;
@@ -487,10 +547,13 @@ export class ImageHandler {
         ])
         .toBuffer();
     } catch (error) {
-      throw new ImageHandlerError(
-        error.statusCode ? error.statusCode : StatusCodes.INTERNAL_SERVER_ERROR,
-        error.code,
-        error.message
+      this.handleError(
+        error,
+        new ImageHandlerError(
+          StatusCodes.BAD_REQUEST,
+          "OverlayImageException",
+          "The overlay image could not be applied. Please contact the system administrator."
+        )
       );
     }
   }
@@ -583,24 +646,31 @@ export class ImageHandler {
         width: boundingBox.Width,
       };
     } catch (error) {
-      console.error(error);
-
-      if (
-        error.message === "Cannot read property 'BoundingBox' of undefined" ||
-        error.message === "Cannot read properties of undefined (reading 'BoundingBox')"
-      ) {
-        throw new ImageHandlerError(
-          StatusCodes.BAD_REQUEST,
-          "SmartCrop::FaceIndexOutOfRange",
-          "You have provided a FaceIndex value that exceeds the length of the zero-based detectedFaces array. Please specify a value that is in-range."
-        );
-      } else {
-        throw new ImageHandlerError(
-          error.statusCode ? error.statusCode : StatusCodes.INTERNAL_SERVER_ERROR,
-          error.code,
-          error.message
-        );
-      }
+      const errorMapping: ErrorMapping[] = [
+        {
+          pattern: "Cannot read property 'BoundingBox' of undefined",
+          statusCode: StatusCodes.BAD_REQUEST,
+          errorType: "SmartCrop::FaceIndexOutOfRange",
+          message:
+            "You have provided a FaceIndex value that exceeds the length of the zero-based detectedFaces array. Please specify a value that is in-range.",
+        },
+        {
+          pattern: "Cannot read properties of undefined (reading 'BoundingBox')",
+          statusCode: StatusCodes.BAD_REQUEST,
+          errorType: "SmartCrop::FaceIndexOutOfRange",
+          message:
+            "You have provided a FaceIndex value that exceeds the length of the zero-based detectedFaces array. Please specify a value that is in-range.",
+        },
+      ];
+      this.handleError(
+        error,
+        new ImageHandlerError(
+          StatusCodes.INTERNAL_SERVER_ERROR,
+          "SmartCrop::Error",
+          "Smart Crop could not be applied. Please contact the system administrator."
+        ),
+        errorMapping
+      );
     }
   }
 
@@ -621,17 +691,19 @@ export class ImageHandler {
       };
       return await this.rekognitionClient.detectModerationLabels(params).promise();
     } catch (error) {
-      console.error(error);
-      throw new ImageHandlerError(
-        error.statusCode ? error.statusCode : StatusCodes.INTERNAL_SERVER_ERROR,
-        error.code,
-        error.message
+      this.handleError(
+        error,
+        new ImageHandlerError(
+          StatusCodes.INTERNAL_SERVER_ERROR,
+          "Rekognition::DetectModerationLabelsError",
+          "Rekognition call failed. Please contact the system administrator."
+        )
       );
     }
   }
 
   /**
-   * Converts serverless image handler image format type to 'sharp' format.
+   * Converts Dynamic Image Transformation for Amazon CloudFront image format type to 'sharp' format.
    * @param imageFormatType Result output file type.
    * @returns Converted 'sharp' format.
    */
@@ -653,6 +725,8 @@ export class ImageHandler {
         return "raw";
       case ImageFormatTypes.GIF:
         return "gif";
+      case ImageFormatTypes.AVIF:
+        return "avif";
       default:
         throw new ImageHandlerError(
           StatusCodes.INTERNAL_SERVER_ERROR,
@@ -668,8 +742,8 @@ export class ImageHandler {
    * @returns object containing image buffer data and original image format.
    */
   private async getRekognitionCompatibleImage(image: sharp.Sharp): Promise<RekognitionCompatibleImage> {
-    const sharp_image = sharp(await image.toBuffer()); // Reload sharp image to ensure current metadata
-    const metadata = await sharp_image.metadata();
+    const sharpImage = sharp(await image.toBuffer()); // Reload sharp image to ensure current metadata
+    const metadata = await sharpImage.metadata();
     const format = metadata.format;
     let imageBuffer: { data: Buffer; info: sharp.OutputInfo };
 
@@ -681,5 +755,28 @@ export class ImageHandler {
     }
 
     return { imageBuffer, format };
+  }
+
+  private handleError(error: Error, defaultError: Error, errorMappings: ErrorMapping[] = []): never {
+    console.error(error);
+
+    // If it's already an ImageHandlerError, rethrow it
+    if (error instanceof ImageHandlerError) {
+      throw error;
+    }
+
+    // Check for specific error patterns
+    for (const mapping of errorMappings) {
+      if (error.message.includes(mapping.pattern)) {
+        throw new ImageHandlerError(
+          mapping.statusCode,
+          mapping.errorType,
+          typeof mapping.message === "function" ? mapping.message(error) : mapping.message
+        );
+      }
+    }
+
+    // Default error if no specific patterns match
+    throw defaultError;
   }
 }

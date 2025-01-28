@@ -18,6 +18,8 @@ export const mockAwsS3 = {
   createBucket: jest.fn(),
   putBucketEncryption: jest.fn(),
   putBucketPolicy: jest.fn(),
+  putBucketTagging: jest.fn(),
+  putBucketVersioning: jest.fn(),
 };
 
 jest.mock("aws-sdk/clients/s3", () => jest.fn(() => ({ ...mockAwsS3 })));
@@ -27,6 +29,24 @@ export const mockAwsSecretManager = {
 };
 
 jest.mock("aws-sdk/clients/secretsmanager", () => jest.fn(() => ({ ...mockAwsSecretManager })));
+
+export const mockCloudFormation = {
+  describeStackResources: jest.fn(),
+};
+
+jest.mock("aws-sdk/clients/cloudformation", () => jest.fn(() => ({ ...mockCloudFormation })));
+
+export const mockCloudFront = {
+  getDistribution: jest.fn(),
+};
+
+jest.mock("aws-sdk/clients/cloudfront", () => jest.fn(() => ({ ...mockCloudFront })));
+
+export const mockServiceCatalogAppRegistry = {
+  getApplication: jest.fn(),
+};
+
+jest.mock("aws-sdk/clients/servicecatalogappregistry", () => jest.fn(() => ({ ...mockServiceCatalogAppRegistry })));
 
 export const mockAxios = {
   put: jest.fn(),

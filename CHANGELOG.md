@@ -5,12 +5,133 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [6.2.5] - 2024-01-12
+## [7.0.0] - 2025-01-27
+
+### Changed
+
+- Location of API Gateway infrastructure resources
+- **Breaking** New condition on API gateway will cause a delete/create of ApiGateway::Deployment on stack update
+- **Breaking:** Exception thrown on invalid resize parameters [#463](https://github.com/aws-solutions/serverless-image-handler/pull/463)
+- Code formatting to align with ESLint rules
+- **Breaking** Reduced passthrough of errors from external APIs to response body. Errors will still be logged.
+- Modified CloudFront logging bucket to have versioning enabled by default
+- CloudFront behaviour to redirect http requests to https rather than throwing forbidden error
+- Set-Cookie was added to list of deny-listed response headers
+- Name of solution from Serverless Image Handler on AWS to Dynamic Image Transformation for Amazon CloudFront.
+
+### Added
+
+- Ability to enable origin shield through a deployment parameter
+- Ability to deploy solution without creating a CloudFront distribution
+- CloudFront function to normalize accept headers when AutoWebP is enabled
+- Alternative infrastructure using S3 Object Lambda to overcome 6 MB response size limit
+- Query param named expires which can be used to define when a generated image should no longer be accessible
+- Ability to include smart_crop as a filter for Thumbor style requests, taking advantage of AWS Rekognition face cropping
+- Ability to set CloudWatch log retention period to Infinite
+- Ability to specify Sharp input image size limit [#465](https://github.com/aws-solutions/serverless-image-handler/issues/465) [#476](https://github.com/aws-solutions/serverless-image-handler/pull/476)
+- Query parameter based image editing [#184](https://github.com/aws-solutions/serverless-image-handler/issues/184)
+- Query parameter normalization to improve cache hit rate
+- CloudWatch dashboard to improve Solution observability
+- Additional anonymized metrics to help understand how the solution is being used, identify areas of improvement, and drive future roadmap decisions.
+
+### Removed
+
+- Accept header being used in cache policy when AutoWebP is disabled
+
+### Fixed
+
+- Broken URLs in Signature and Fallback Image template parameters
+
+## [6.3.3] - 2024-12-27
+
+### Fixed
+
+- Overlays not checking for valid S3 buckets
+- Failures when updating deployments created in version 6.1.0 and prior [#559](https://github.com/aws-solutions/serverless-image-handler/issues/559)
+
+### Security
+
+- Added allowlist on sharp operations. [Info](https://docs.aws.amazon.com/solutions/latest/serverless-image-handler/create-and-use-image-requests.html#restricted-operations)
+- Added deny list on custom headers for base64 encoded requests. [Info](https://docs.aws.amazon.com/solutions/latest/serverless-image-handler/create-and-use-image-requests.html#include-custom-response-headers)
+- Added inference of Content-Type header if S3 Metadata provides an unsupported value
+
+## [6.3.2] - 2024-11-22
+
+### Fixed
+
+- Upgrade cross-spawn to v7.0.6 for vulnerability [CVE-2024-9506](https://github.com/advisories/GHSA-5j4c-8p2g-v4jx)
+
+## [6.3.1] - 2024-10-02
+
+### Fixed
+
+- Base-64 encoded overlayWith call requiring strings in top/left options rather than numbers
+- CloudFront anonymized metrics missing for deployments outside of us-east-1
+
+## [6.3.0] - 2024-09-09
+
+### Added
+
+- Additional anonymized metrics system to help understand how the solution is being used, identify areas of improvement, and drive future roadmap decisions.
+
+### Changed
+
+- Cdk update to 2.151.0
+- Default log retention to 180 days
+- Cache-control header on fallback images to use (in order of priority), fallback image metadata, header provided in image request, and default cache control [#563](https://github.com/aws-solutions/serverless-image-handler/issues/563)
+
+### Security
+
+- Upgraded micromatch to v4.0.8 for vulnerability CVE-2024-4067
+
+## [6.2.7] - 2024-08-19
+
+### Security
+
+- Upgraded axios to v1.7.4 for vulnerability CVE-2024-39338
+
+## [6.2.6] - 2024-06-27
+
+### Added
+
+- StackId tag to CloudFrontLoggingBucket and its bucket name as a CfnOutput [#529](https://github.com/aws-solutions/serverless-image-handler/issues/529)
+- Test case to verify UTF-8 support in object key [#320](https://github.com/aws-solutions/serverless-image-handler/pull/320)
+- Test cases to verify crop functionality [#459](https://github.com/aws-solutions/serverless-image-handler/pull/459)
+- VERSION.txt and build script change to auto-update local package versions
+- S3:bucket-name tag for defining which source bucket to use in thumbor style requests [#521](https://github.com/aws-solutions/serverless-image-handler/pull/521)
+- Ability to override whether an image should be animated [#456](https://github.com/aws-solutions/serverless-image-handler/issues/456)
+- Support for 8-bit depth AVIF image type inference [#360](https://github.com/aws-solutions/serverless-image-handler/issues/360)
+
+### Changed
+
+- Decreased permissions allotted to CustomResource Lambda and ImageHandler Lambda
+- cdk update to 2.124.0
+- aws-solutions-constructs update to 2.51.0
+- SourceBucketsParameter to require explicit bucket names
+- Demo-ui dependency update
+- Demo-ui to be a package and manage script/stylesheet dependencies through NPM
+- Modified JPEG SOI marker parsing to only check first 2 bytes [#429]
+
+### Security
+
+- Upgraded follow-redirects to v1.15.6 for vulnerability CVE-2024-28849
+- Upgraded braces to v3.0.3 for vulnerability CVE-2024-4068
+
+### Removed
+
+- Unused CopyS3Assets custom resource
+
+### Fixed
+
+- Some error messages indicating incorrect file types
+- Solution version and id not being passed to Backend Lambda
+- Thumbor-style URL matching being overly permissive
+
+## [6.2.5] - 2024-01-03
 
 ### Fixed
 
 - Ensure accurate image metadata when generating Amazon Rekognition compatible images [#374](https://github.com/aws-solutions/serverless-image-handler/issues/374)
-- Upgraded axios to v1.6.5 for vulnerability CVE-2023-26159
 - Exclude demo-ui-config from being deleted upon BucketDeployment update sync when updating to a new version
 
 ### Changed
@@ -19,6 +140,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - cdk update to 2.118.0
 - typescript update to 5.3.3
 - GIF files without multiple pages are now treated as non-animated, allowing all filters to be used on them [#460](https://github.com/aws-solutions/serverless-image-handler/issues/460)
+
+### Security
+
+- Upgraded axios to v1.6.5 for vulnerability CVE-2023-26159
 
 ## [6.2.4] - 2023-12-06
 

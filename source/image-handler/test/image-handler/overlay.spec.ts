@@ -9,7 +9,7 @@ import fs from "fs";
 import sharp from "sharp";
 
 import { ImageHandler } from "../../image-handler";
-import { ImageEdits, ImageHandlerError, StatusCodes, ImageRequestInfo, RequestTypes } from "../../lib";
+import { ImageEdits, StatusCodes, ImageRequestInfo, RequestTypes } from "../../lib";
 
 const s3Client = new S3();
 const rekognitionClient = new Rekognition();
@@ -17,6 +17,7 @@ const rekognitionClient = new Rekognition();
 describe("overlay", () => {
   beforeEach(() => {
     jest.resetAllMocks();
+    process.env.SOURCE_BUCKETS = "validBucket, sourceBucket, bucket, sample-bucket";
   });
 
   afterEach(() => {
@@ -305,17 +306,11 @@ describe("overlay", () => {
     expect(overlayImageMetadata.height).toEqual(11);
   });
 
-  it("Should throw an error if an invalid bucket or key name is provided, simulating a nonexistent overlay image", async () => {
+  it("Should throw an error if an invalid key name is provided, simulating a nonexistent overlay image", async () => {
     // Mock
     mockAwsS3.getObject.mockImplementationOnce(() => ({
       promise() {
-        return Promise.reject(
-          new ImageHandlerError(
-            StatusCodes.INTERNAL_SERVER_ERROR,
-            "InternalServerError",
-            "SimulatedInvalidParameterException"
-          )
-        );
+        return Promise.reject(new Error());
       },
     }));
 
@@ -328,17 +323,38 @@ describe("overlay", () => {
       )
     ).metadata();
     try {
-      await imageHandler.getOverlayImage("invalidBucket", "invalidKey", "100", "100", "20", metadata);
+      await imageHandler.getOverlayImage("bucket", "invalidKey", "100", "100", "20", metadata);
     } catch (error) {
       // Assert
       expect(mockAwsS3.getObject).toHaveBeenCalledWith({
-        Bucket: "invalidBucket",
+        Bucket: "bucket",
         Key: "invalidKey",
       });
       expect(error).toMatchObject({
-        status: StatusCodes.INTERNAL_SERVER_ERROR,
-        code: "InternalServerError",
-        message: "SimulatedInvalidParameterException",
+        status: StatusCodes.BAD_REQUEST,
+        code: "OverlayImageException",
+        message: "The overlay image could not be applied. Please contact the system administrator.",
+      });
+    }
+  });
+  it("Should throw an error if an invalid bucket is provided", async () => {
+    // Act
+    const imageHandler = new ImageHandler(s3Client, rekognitionClient);
+    const metadata = await sharp(
+      Buffer.from(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+        "base64"
+      )
+    ).metadata();
+    try {
+      await imageHandler.getOverlayImage("invalidBucket", "key", "100", "100", "20", metadata);
+    } catch (error) {
+      // Assert
+      expect(error).toMatchObject({
+        status: StatusCodes.FORBIDDEN,
+        code: "ImageBucket::CannotAccessBucket",
+        message:
+          "The overlay image bucket you specified could not be accessed. Please check that the bucket is specified in your SOURCE_BUCKETS.",
       });
     }
   });
@@ -387,6 +403,34 @@ describe("calcOverlaySizeOption", () => {
     expect(result).toEqual(50);
   });
 
+  it("should return the specified parameter if param is a positive number and an integer", () => {
+    // Arrange
+    const imageSize = 100;
+    const editSize = 50;
+    const overlaySize = 50;
+    const imageHandler = new ImageHandler(s3Client, rekognitionClient);
+
+    // Act
+    const result = imageHandler["calcOverlaySizeOption"](editSize, imageSize, overlaySize);
+
+    // Assert
+    expect(result).toEqual(50);
+  });
+
+  it("should return the image size + specified parameter - overlay size if param is less than 0 and an integer", () => {
+    // Arrange
+    const imageSize = 100;
+    const editSize = -60;
+    const overlaySize = 50;
+    const imageHandler = new ImageHandler(s3Client, rekognitionClient);
+
+    // Act
+    const result = imageHandler["calcOverlaySizeOption"](editSize, imageSize, overlaySize);
+
+    // Assert
+    expect(result).toEqual(-10);
+  });
+
   it("should return the image size + specified parameter - overlay size if param is less than 0", () => {
     // Arrange
     const imageSize = 100;
@@ -425,7 +469,7 @@ describe("calcOverlaySizeOption", () => {
  * - height is greater
  */
 describe("overlay-dimensions", () => {
-  const SHARP_ERROR = "Image to composite must have same dimensions or smaller";
+  const SHARP_ERROR = "Image to overlay must have same dimensions or smaller";
   it("Should pass and not throw an exception when the overlay image dimensions are both equal - png", async () => {
     // Mock
     const originalImage = fs.readFileSync("./test/image/25x15.png");

@@ -14,3 +14,5 @@ overrideWarningsEnabled=false npx cdk bootstrap
 overrideWarningsEnabled=false npx cdk deploy --parameters DeployDemoUIParameter=No --parameters AutoWebPParameter=Yes --parameters SourceBucketsParameter=$BUCKET
 
 cd ../..
+
+# exemple de commande : ./deploy.sh heustach-resources-dev dev
